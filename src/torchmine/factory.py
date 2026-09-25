@@ -10,9 +10,9 @@ from .contracts import ModelBase, ProcessorBase, TrainerBase
 ModelType = type[ModelBase]
 ProcessorType = type[ProcessorBase]
 TrainerType = type[TrainerBase]
-OptimizerType = type[torch.optim.Optimizer]
 
 
+# Internal class to resolve components from the registry and build the training pipeline
 class ComponentRegistry:
     def __init__(self) -> None:
         self._model_types: dict[str, ModelType] = {}
@@ -60,13 +60,35 @@ class ComponentRegistry:
         except TypeError as e:
             raise ValueError(f"Invalid model_params for model '{model_name}': {model_kwargs}") from e
 
-    def resolve_trainer_type(self, *, trainer_name: str) -> TrainerType:
+    def resolve_trainer(
+        self,
+        *,
+        trainer_name: str,
+        model: ModelBase,
+        optimizer: torch.optim.Optimizer,
+        device: str | torch.device,
+        trainer_params: Mapping[str, Any] | None = None,
+    ) -> TrainerBase:
         self._ensure_loaded()
         if trainer_name not in self._trainer_types:
             raise ValueError(
                 f"Unsupported trainer '{trainer_name}'. Available trainers: {self.available_trainers()}"
             )
-        return self._trainer_types[trainer_name]
+
+        trainer_type = self._trainer_types[trainer_name]
+        target_device = torch.device(device)
+        trainer_kwargs = dict(trainer_params or {})
+        try:
+            return trainer_type(
+                model=model,
+                optimizer=optimizer,
+                device=target_device,
+                **trainer_kwargs,
+            )
+        except TypeError as e:
+            raise ValueError(
+                f"Invalid trainer_params for trainer '{trainer_type.__name__}': {trainer_kwargs}"
+            ) from e
 
     def resolve_processor(
         self,
@@ -89,17 +111,6 @@ class ComponentRegistry:
                 f"Invalid params for processor '{processor_name}': {processor_kwargs}"
             ) from e
 
-    def resolve_components(
-        self,
-        *,
-        model_name: str,
-        trainer_name: str,
-        model_params: Mapping[str, Any] | None = None,
-    ) -> tuple[ModelBase, TrainerType]:
-        model = self.resolve_model(model_name=model_name, model_params=model_params)
-        trainer_type = self.resolve_trainer_type(trainer_name=trainer_name)
-        return model, trainer_type
-
     def _ensure_loaded(self) -> None:
         if self._loaded:
             return
@@ -110,21 +121,7 @@ class ComponentRegistry:
         register(self)
         self._loaded = True
 
-
 REGISTRY = ComponentRegistry()
-
-
-def resolve_components(
-    *,
-    model_name: str,
-    trainer_name: str,
-    model_params: Mapping[str, Any] | None = None,
-) -> tuple[ModelBase, TrainerType]:
-    return REGISTRY.resolve_components(
-        model_name=model_name,
-        model_params=model_params,
-        trainer_name=trainer_name,
-    )
 
 
 def resolve_model(
@@ -132,93 +129,49 @@ def resolve_model(
     model_name: str,
     model_params: Mapping[str, Any] | None = None,
 ) -> ModelBase:
+    """Resolve and build a model from the registry."""
     return REGISTRY.resolve_model(
         model_name=model_name,
         model_params=model_params,
     )
 
-
-def resolve_trainer_type(*, trainer_name: str) -> TrainerType:
-    return REGISTRY.resolve_trainer_type(trainer_name=trainer_name)
-
+def resolve_trainer(
+    *,
+    trainer_name: str,
+    model: ModelBase,
+    optimizer: torch.optim.Optimizer,
+    device: str | torch.device,
+    trainer_params: Mapping[str, Any] | None = None,
+) -> TrainerBase:
+    """Resolve and build a trainer from the registry."""
+    return REGISTRY.resolve_trainer(
+        trainer_name=trainer_name,
+        model=model,
+        optimizer=optimizer,
+        device=device,
+        trainer_params=trainer_params,
+    )
 
 def resolve_processor(
     *,
     processor_name: str,
     processor_params: Mapping[str, Any] | None = None,
 ) -> ProcessorBase:
+    """Resolve and build a processor from the registry."""
     return REGISTRY.resolve_processor(
         processor_name=processor_name,
         processor_params=processor_params,
     )
 
 
-def build_trainer(
-    *,
-    trainer_type: TrainerType,
-    model: torch.nn.Module,
-    optimizer: torch.optim.Optimizer,
-    device: str | torch.device,
-    trainer_params: Mapping[str, Any] | None = None,
-) -> TrainerBase:
-    target_device = torch.device(device)
-    trainer_kwargs = dict(trainer_params or {})
-    try:
-        return trainer_type(
-            model=model,
-            optimizer=optimizer,
-            device=target_device,
-            **trainer_kwargs,
-        )
-    except TypeError as e:
-        raise ValueError(
-            f"Invalid trainer_params for trainer '{trainer_type.__name__}': {trainer_kwargs}"
-        ) from e
-
-
-def build_training_components(
-    *,
-    model_name: str,
-    trainer_name: str,
-    model_params: Mapping[str, Any] | None = None,
-    trainer_params: Mapping[str, Any] | None = None,
-    optimizer_cls: OptimizerType = torch.optim.Adam,
-    optimizer_params: Mapping[str, Any] | None = None,
-    device: str | torch.device | None = None,
-) -> tuple[ModelBase, torch.optim.Optimizer, TrainerBase]:
-    target_device = torch.device(device) if device is not None else torch.device("cpu")
-    model, trainer_type = resolve_components(
-        model_name=model_name,
-        model_params=model_params,
-        trainer_name=trainer_name,
-    )
-    model = model.to(target_device)
-
-    optimizer_kwargs = dict(optimizer_params or {})
-    try:
-        optimizer = optimizer_cls(model.parameters(), **optimizer_kwargs)
-    except TypeError as e:
-        raise ValueError(
-            f"Invalid optimizer_params for optimizer '{optimizer_cls.__name__}': {optimizer_kwargs}"
-        ) from e
-
-    trainer = build_trainer(
-        trainer_type=trainer_type,
-        model=model,
-        optimizer=optimizer,
-        device=target_device,
-        trainer_params=trainer_params,
-    )
-    return model, optimizer, trainer
-
-
 def available_models() -> list[str]:
+    """Show the names of all registered models."""
     return REGISTRY.available_models()
 
+def available_trainers() -> list[str]:
+    """Show the names of all registered trainers."""
+    return REGISTRY.available_trainers()
 
 def available_processors() -> list[str]:
+    """Show the names of all registered processors."""
     return REGISTRY.available_processors()
-
-
-def available_trainers() -> list[str]:
-    return REGISTRY.available_trainers()

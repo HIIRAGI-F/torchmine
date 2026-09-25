@@ -12,25 +12,16 @@ import yaml
 from torch.utils.data import DataLoader, TensorDataset
 
 from ..contracts import ModelBase, PipelineBase, ProcessorBase
-from ..factory import build_training_components, resolve_model, resolve_processor
+from ..factory import resolve_model, resolve_processor, resolve_trainer
 
 
-def _plain(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, Mapping):
-        return {str(key): _plain(item) for key, item in value.items()}
-    if isinstance(value, (tuple, list)):
-        return [_plain(item) for item in value]
-    return value
-
-
+# Configuration for processors
 @dataclass(frozen=True, slots=True)
 class ProcessorConfig:
     name: str
     params: dict[str, Any] = field(default_factory=dict)
 
-
+# Configuration for the whole workflow
 @dataclass(slots=True)
 class WorkflowConfig:
     model_name: str
@@ -60,10 +51,9 @@ class WorkflowConfig:
     save_last: bool = True
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert paths and dataclasses to checkpoint-safe values."""
         return _plain(asdict(self))
 
-
+# Input data structure
 @dataclass(frozen=True, slots=True)
 class WorkflowTrainingData:
     train_x: torch.Tensor
@@ -72,7 +62,7 @@ class WorkflowTrainingData:
     val_y: torch.Tensor
     checkpoint_payload: Mapping[str, Any] | None = None
 
-
+# Output data structure
 @dataclass(frozen=True, slots=True)
 class WorkflowResults:
     run_dir: Path
@@ -89,13 +79,12 @@ class WorkflowResults:
     val_loss_history: list[float]
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert the result to plain Python values."""
         return _plain(asdict(self))
 
-
+# For overriding processor states
 ProcessorEntry = tuple[ProcessorConfig, ProcessorBase]
 
-
+# PipelineBase
 class WorkflowEarlyStoppingPipeline(
     PipelineBase[WorkflowTrainingData, WorkflowResults],
 ):
@@ -139,13 +128,17 @@ class WorkflowEarlyStoppingPipeline(
             num_workers=config.num_workers,
         )
         extra_payload = data.checkpoint_payload
-        model, _, trainer = build_training_components(
+        model = resolve_model(
             model_name=config.model_name,
             model_params=config.model_params,
+        ).to(self.device)
+        optimizer = torch.optim.Adam(model.parameters(), lr=config.lr, eps=config.eps)
+        trainer = resolve_trainer(
             trainer_name=config.trainer_name,
-            trainer_params=config.trainer_params,
-            optimizer_params={"lr": config.lr, "eps": config.eps},
+            model=model,
+            optimizer=optimizer,
             device=self.device,
+            trainer_params=config.trainer_params,
         )
         self.model = model
         self.is_trained = False
@@ -259,7 +252,7 @@ class WorkflowEarlyStoppingPipeline(
             raise ValueError("Processors must preserve the model device during prediction")
         return predicted
 
-    # Initialization
+    # Initialize
     def _configure(self, config: WorkflowConfig) -> None:
         if not config.model_name or not config.trainer_name:
             raise ValueError("model_name and trainer_name are required")
@@ -279,7 +272,7 @@ class WorkflowEarlyStoppingPipeline(
         self.model = None
         self.is_trained = False
 
-    # Initialization of processors
+    # Initialize processors
     @staticmethod
     def _build_processors(configs: list[ProcessorConfig]) -> list[ProcessorEntry]:
         entries: list[ProcessorEntry] = []
@@ -389,3 +382,13 @@ class WorkflowEarlyStoppingPipeline(
                 raise ValueError(f"checkpoint_payload cannot replace reserved keys: {sorted(overlap)}")
             payload.update(extra)
         torch.save(payload, path)
+
+# Chore
+def _plain(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Mapping):
+        return {str(key): _plain(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_plain(item) for item in value]
+    return value
